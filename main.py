@@ -224,6 +224,11 @@ class SimpleDB:
                     row["key"]: row["value"]
                     for row in conn.execute("SELECT key, value FROM stats")
                 }
+                snapshot["country_cards"] = [
+                    row["country_data"]
+                    for row in conn.execute(
+                        "SELECT country_data FROM country_cards ORDER BY processed_at DESC LIMIT 10000"
+                    )
                 snapshot["processed_cards"] = [
                     row["card_data"]
                     for row in conn.execute(
