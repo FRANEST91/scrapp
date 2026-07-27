@@ -170,6 +170,21 @@ class SimpleDB:
         conn.row_factory = sqlite3.Row
         return conn
 
+    def _migrate_database(self, conn: sqlite3.Connection) -> None:
+        """Realiza migraciones necesarias en la base de datos."""
+        try:
+            # Verificar si la columna 'country' existe en processed_cards
+            cursor = conn.execute("PRAGMA table_info(processed_cards)")
+            columns = [row[1] for row in cursor.fetchall()]
+            
+            if 'country' not in columns:
+                logger.info("Migrando: Agregando columna 'country' a tabla processed_cards...")
+                conn.execute("ALTER TABLE processed_cards ADD COLUMN country TEXT DEFAULT 'Desconocido'")
+                conn.commit()
+                logger.info("✅ Migración completada: columna 'country' agregada")
+        except Exception as e:
+            logger.warning(f"⚠️ Error durante migración: {e}")
+
     def _load(self) -> Dict[str, Any]:
         """Inicializa la DB SQLite y devuelve una vista cacheada compatible con el bot."""
         try:
@@ -196,7 +211,7 @@ class SimpleDB:
                         card_data TEXT PRIMARY KEY,
                         processed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                         source_info TEXT,
-                        country TEXT
+                        country TEXT DEFAULT 'Desconocido'
                     )
                     """
                 )
@@ -220,6 +235,9 @@ class SimpleDB:
                 conn.execute("INSERT OR IGNORE INTO stats (key, value) VALUES ('total_cards', 0)")
                 conn.execute("INSERT OR IGNORE INTO stats (key, value) VALUES ('total_scans', 0)")
                 conn.commit()
+                
+                # Ejecutar migraciones
+                self._migrate_database(conn)
         except sqlite3.Error as e:
             logger.error(f"❌ Error inicializando DB SQLite en '{self.db_path}': {e}")
 
@@ -367,14 +385,22 @@ class SimpleDB:
                 writer = csv.writer(f)
                 writer.writerow(["Card Data", "Source Info", "Country", "Processed At"])
 
-                for row in conn.execute("SELECT card_data, source_info, country, processed_at FROM processed_cards ORDER BY processed_at DESC"):
+                # Usar COALESCE para manejar valores NULL
+                for row in conn.execute(
+                    """SELECT card_data, COALESCE(source_info, '') as source_info, 
+                              COALESCE(country, 'Desconocido') as country, processed_at 
+                       FROM processed_cards ORDER BY processed_at DESC"""
+                ):
                     card_data = row["card_data"]
-                    source_info = row["source_info"] if row["source_info"] is not None else ""
-                    country = row["country"] if row["country"] is not None else "Desconocido"
+                    source_info = row["source_info"]
+                    country = row["country"]
                     processed_at = row["processed_at"]
                     writer.writerow([card_data, source_info, country, processed_at])
+                
+                logger.info(f"✅ CSV exportado exitosamente a: {export_path}")
 
-        except Exception:
+        except Exception as e:
+            logger.error(f"❌ Error durante la exportación CSV: {e}")
             try:
                 os.close(fd)
             except OSError:
@@ -391,12 +417,16 @@ class SimpleDB:
             with self._connect() as conn:
                 if country:
                     rows = conn.execute(
-                        "SELECT card_data, source_info, country, processed_at FROM processed_cards WHERE country = ? ORDER BY processed_at DESC LIMIT 10000",
+                        """SELECT card_data, COALESCE(source_info, '') as source_info, 
+                                  COALESCE(country, 'Desconocido') as country, processed_at 
+                           FROM processed_cards WHERE country = ? ORDER BY processed_at DESC LIMIT 10000""",
                         (country,)
                     ).fetchall()
                 else:
                     rows = conn.execute(
-                        "SELECT card_data, source_info, country, processed_at FROM processed_cards ORDER BY processed_at DESC LIMIT 10000"
+                        """SELECT card_data, COALESCE(source_info, '') as source_info, 
+                                  COALESCE(country, 'Desconocido') as country, processed_at 
+                           FROM processed_cards ORDER BY processed_at DESC LIMIT 10000"""
                     ).fetchall()
                 
                 return [
@@ -417,7 +447,8 @@ class SimpleDB:
         try:
             with self._connect() as conn:
                 rows = conn.execute(
-                    "SELECT country, COUNT(*) as count FROM processed_cards GROUP BY country ORDER BY count DESC"
+                    """SELECT COALESCE(country, 'Desconocido') as country, COUNT(*) as count 
+                       FROM processed_cards GROUP BY country ORDER BY count DESC"""
                 ).fetchall()
                 
                 return {row["country"]: row["count"] for row in rows}
