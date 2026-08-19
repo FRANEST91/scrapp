@@ -181,8 +181,8 @@ class SimpleDB:
     def add_cards_stats(self, count: int = 1) -> None:
         try:
             with self._connect() as conn:
-                conn.execute("INSERT INTO stats (key, value) VALUES ('total_cards', ?) ON CONFLICT(key) DO UPDATE SET value = value + excluded.value", (count,))
-                conn.execute("INSERT INTO stats (key, value) VALUES ('total_scans', 1) ON CONFLICT(key) DO UPDATE SET value = value + 1")
+                conn.execute("UPDATE stats SET value = value + ? WHERE key = 'total_cards'", (count,))
+                conn.execute("UPDATE stats SET value = value + 1 WHERE key = 'total_scans'")
                 conn.commit()
             self._refresh_cache()
         except sqlite3.Error as e:
@@ -319,30 +319,51 @@ def get_repo_root() -> str:
     return os.path.dirname(os.path.abspath(__file__))
 
 def load_cards_from_repo_csv(csv_filename: str = REPO_CSV_FILENAME) -> List[str]:
+    """
+    Lee el CSV scrapp_db.csv y extrae las tarjetas.
+    El CSV tiene columnas: Card Data, Source Info, Processed At
+    """
     cards: List[str] = []
     csv_path = os.path.join(get_repo_root(), csv_filename)
+    
     if not os.path.exists(csv_path):
         logger.debug(f"CSV not found at {csv_path}")
         return cards
+    
     try:
         with open(csv_path, "r", encoding="utf-8-sig", newline="") as f:
             reader = csv.DictReader(f)
+            
             if not reader.fieldnames:
+                logger.warning(f"CSV is empty or has no headers: {csv_path}")
                 return cards
-            field_map = {name.lower(): name for name in reader.fieldnames}
-            key = None
-            for candidate in ("card data", "card_data", "carddata", "card"):
-                if candidate in field_map:
-                    key = field_map[candidate]
+            
+            # Normalizar nombres de columnas (case-insensitive)
+            fieldnames_lower = {name.lower(): name for name in reader.fieldnames}
+            logger.info(f"CSV columns found: {list(reader.fieldnames)}")
+            
+            # Buscar la columna de datos de tarjeta
+            card_column = None
+            for candidate in ("card data", "carddata", "card", "tarjeta"):
+                if candidate in fieldnames_lower:
+                    card_column = fieldnames_lower[candidate]
                     break
-            if not key:
+            
+            if not card_column:
+                logger.error(f"No se encontró columna de datos de tarjeta en: {list(reader.fieldnames)}")
                 return cards
-            for row in reader:
-                raw = (row.get(key) or "").strip()
+            
+            logger.info(f"Using card column: {card_column}")
+            
+            for row_idx, row in enumerate(reader, start=2):
+                raw = (row.get(card_column) or "").strip()
                 if raw:
                     cards.append(raw)
+                    logger.debug(f"Row {row_idx}: Card loaded - {raw[:20]}...")
+    
     except Exception as e:
-        logger.exception(f"Error reading CSV: {e}")
+        logger.exception(f"Error reading CSV {csv_path}: {e}")
+    
     logger.info(f"Loaded {len(cards)} cards from {csv_path}")
     return cards
 
@@ -351,15 +372,24 @@ async def replay_cards_from_csv_loop(csv_filename: str = REPO_CSV_FILENAME) -> N
     while True:
         try:
             cards = load_cards_from_repo_csv(csv_filename)
+            logger.info(f"Processing {len(cards)} cards from CSV")
+            
             for card in cards:
                 if db.is_card_processed(card):
+                    logger.debug(f"Card already processed: {card[:20]}...")
                     continue
-                await send_card_immediately(card, "CSV import")
+                
+                success = await send_card_immediately(card, "CSV import")
+                if success:
+                    logger.info(f"Card queued: {card[:20]}...")
+                
                 await asyncio.sleep(SEND_INTERVAL_SECONDS)
         except asyncio.CancelledError:
             raise
         except Exception:
             logger.exception("Error in CSV replay loop")
+        
+        logger.info(f"CSV replay cycle completed. Waiting {CHECK_INTERVAL}s before next cycle...")
         await asyncio.sleep(CHECK_INTERVAL)
 
 # --- Bot commands (minimal) ---
